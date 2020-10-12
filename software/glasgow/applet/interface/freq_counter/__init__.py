@@ -42,6 +42,7 @@ class FreqCounter(Elaboratable):
         cyc_cur_lo = Signal.like(self.counters["total"][0])
         cyc_cur_hi = Signal.like(self.counters["total"][1])
         cyc_cur_v = Array([ cyc_cur_lo, cyc_cur_hi ])
+        cyc_cur_t = cyc_cur_lo + cyc_cur_hi
         cyc_cur = cyc_cur_v[self.signal_in]
 
         with m.FSM() as fsm:
@@ -58,6 +59,8 @@ class FreqCounter(Elaboratable):
                         self.counters["max_l"][0].eq( 0), self.counters["max_l"][1].eq( 0),
                         self.counters["min_h"][0].eq(~0), self.counters["min_h"][1].eq(~0),
                         self.counters["max_h"][0].eq( 0), self.counters["max_h"][1].eq( 0),
+                        self.counters["min_t"][0].eq(~0), self.counters["min_t"][1].eq(~0),
+                        self.counters["max_t"][0].eq( 0), self.counters["max_t"][1].eq( 0),
                     ]
                     m.next = "COUNT-WAIT"
 
@@ -87,6 +90,17 @@ class FreqCounter(Elaboratable):
                         cyc_cur_x = cyc_cur_v[lvl]
                         counter_x = self.counters[k][lvl]
                         with m.If(cyc_cur_x < counter_x if lt else cyc_cur_x > counter_x):
+                            m.d.sync += [
+                                self.counters[k][0].eq(cyc_cur_v[0]),
+                                self.counters[k][1].eq(cyc_cur_v[1]),
+                            ]
+
+                    for k, lt in (
+                        ( "min_t", True  ),
+                        ( "max_t", False ),
+                    ):
+                        counter_t = self.counters[k][0] + self.counters[k][1]
+                        with m.If(cyc_cur_t < counter_t if lt else cyc_cur_t > counter_t):
                             m.d.sync += [
                                 self.counters[k][0].eq(cyc_cur_v[0]),
                                 self.counters[k][1].eq(cyc_cur_v[1]),
@@ -166,6 +180,8 @@ class FreqCounterApplet(GlasgowApplet, name="freq-counter"):
             "max_l": ( target.registers.add_ro(32), target.registers.add_ro(32) ),
             "min_h": ( target.registers.add_ro(32), target.registers.add_ro(32) ),
             "max_h": ( target.registers.add_ro(32), target.registers.add_ro(32) ),
+            "min_t": ( target.registers.add_ro(32), target.registers.add_ro(32) ),
+            "max_t": ( target.registers.add_ro(32), target.registers.add_ro(32) ),
         }
         counters        = { k: [ _[0] for _ in v ] for k,v in counter_regs.items() }
         self.__counters = { k: [ _[1] for _ in v ] for k,v in counter_regs.items() }
