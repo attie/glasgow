@@ -2,6 +2,7 @@ from .internal.selftest import SelfTestApplet
 from .internal.benchmark import BenchmarkApplet
 
 from .interface.analyzer import AnalyzerApplet
+from .interface.can_sniff import CANSniffApplet
 from .interface.uart import UARTApplet
 from .interface.spi_controller import SPIControllerApplet
 from .interface.i2c_initiator import I2CInitiatorApplet
