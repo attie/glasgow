@@ -1,5 +1,6 @@
 import os
 import sys
+import math
 import logging
 import asyncio
 import argparse
@@ -59,7 +60,12 @@ class CANTiming(Elaboratable):
     def elaborate(self, platform):
         baudrate = 250000              # TODO: make variable, currently hard coded to 250 kbit/s
         quanta = baudrate * 10         # x10 is to permit time quanta in bit time
-        bit_cyc = round(platform.default_clk_frequency / quanta) # ~19 for 250 kbit/s
+
+        bit_cyc_float = platform.default_clk_frequency / quanta # ~19.2 for 250 kbit/s
+        bit_cyc = math.floor(bit_cyc_float) # ~19
+        bit_cyc_fix = round((bit_cyc_float - bit_cyc) * 10)
+
+        bit_cyc = math.ceil(platform.default_clk_frequency / quanta) # ~19 for 250 kbit/s
 
         # TODO: make this configurable
         # <-- bit boundary
@@ -70,12 +76,20 @@ class CANTiming(Elaboratable):
         seg2 = 3
         # <-- bit boundary
 
-        bit_setup_cyc  = (sync + prop + seg1       ) * bit_cyc # bit boundary to sample point
-        bit_period_cyc = (sync + prop + seg1 + seg2) * bit_cyc # bit boundray to next bit boundary
+        bit_setup_cyc  = (sync + prop + seg1       ) * bit_cyc               # bit boundary to sample point
+        bit_period_cyc = (sync + prop + seg1 + seg2) * bit_cyc + bit_cyc_fix # bit boundray to next bit boundary
+
+        print(f'{bit_setup_cyc=}')  #        133 ticks
+        print(f'{bit_period_cyc=}') #        192 ticks
+                                    # total: 192 ticks
 
         m = Module()
 
         ctr = Signal(32)
+
+        last_bit = Signal()
+        m.d.sync += last_bit.eq(self.rx_trigger)
+        edge_cut = (ctr > bit_setup_cyc) & (self.rx_trigger ^ last_bit)
 
         with m.FSM() as fsm:
             m.d.comb += self.idle.eq(fsm.ongoing("IDLE"))
@@ -92,7 +106,7 @@ class CANTiming(Elaboratable):
                 with m.If(ctr == bit_setup_cyc):
                     m.d.comb += self.sample_stb.eq(1)
 
-                with m.If(ctr >= bit_period_cyc):
+                with m.If(edge_cut | (ctr >= bit_period_cyc)):
                     m.d.comb += self.boundary_stb.eq(1)
                     m.d.sync += ctr.eq(0)
 
@@ -231,7 +245,11 @@ class CANSubtarget(Elaboratable):
         with m.FSM() as fsm:
             m.d.comb += timing.run.eq(~fsm.ongoing("IDLE"))
             m.d.comb += crc.rst.eq(fsm.ongoing("IDLE"))
+
             m.d.comb += self.pads.dbgarb_t.o.eq(fsm.ongoing("IDLE"))
+
+            #m.d.comb += self.pads.dbgarb_t.o.eq(timing.boundary_stb)
+
             #m.d.comb += self.pads.dbgarb_t.o.eq(fsm.ongoing("ARBITRATION-ID"))
             #m.d.comb += self.pads.dbgarb_t.o.eq(fsm.ongoing("ACK-END"))
             #m.d.comb += self.pads.dbgarb_t.o.eq(fsm.ongoing("ARBITRATION-ID"))
@@ -279,7 +297,7 @@ class CANSubtarget(Elaboratable):
                             m.d.sync += ctr.eq(14)
                             m.next = "CRC"
                         with m.Elif(ll.rx_data[:4] > 8):
-                            m.next = "IDLE-WAIT-INIT" # <-- this is illegal
+                            m.next = "IDLE" # <-- this is illegal
                         with m.Else():
                             m.d.sync += ctl_dlc.eq(ll.rx_data[:4] - 1)
                             m.d.sync += ctr.eq(7)
@@ -328,13 +346,31 @@ class CANSubtarget(Elaboratable):
                     self.in_fifo.w_data.eq(crc.out == 0),
                     self.in_fifo.w_en.eq(1),
                 ]
-                m.next = "IDLE-WAIT-INIT"
+                m.d.sync += ctr.eq(1)
+                m.next = "CRC-DELIM"
 
-            with m.State("IDLE-WAIT-INIT"):
-                m.d.sync += ctr.eq(8)
-                m.next = "IDLE-WAIT"
+            with m.State("CRC-DELIM"):
+                with m.If(timing.boundary_stb):
+                    m.d.sync += ctr.eq(ctr - 1)
+                    with m.If(ctr == 0):
+                        m.next = "ACK"
 
-            with m.State("IDLE-WAIT"):
+            with m.State("ACK"):
+                m.d.comb += bus.tx_o.eq(crc.out != 0)
+
+                with m.If(timing.boundary_stb):
+                    m.next = "ACK-DELIM"
+
+            with m.State("ACK-DELIM"):
+                with m.If(ll.rx_stb):
+                    m.next = "IDLE"
+                    #m.next = "EOF-INIT"
+
+            with m.State("EOF-INIT"):
+                m.d.sync += ctr.eq(6)
+                m.next = "EOF"
+
+            with m.State("EOF"):
                 with m.If(ll.rx_stb):
                     m.d.sync += ctr.eq(ctr - 1)
                     
