@@ -52,6 +52,7 @@ class CANTiming(Elaboratable):
         self.rx_trigger = ~bus.rx_i # effectively CAN_H
         self.run        = Signal()  # continue running? assert while in frame
 
+        self.idle            = Signal()        # timing in idle
         self.boundary_stb    = Signal(reset=0) # strobe for rx bit boundary
         self.sample_stb      = Signal(reset=0) # strobe for rx bit sample point
 
@@ -77,6 +78,8 @@ class CANTiming(Elaboratable):
         ctr = Signal(32)
 
         with m.FSM() as fsm:
+            m.d.comb += self.idle.eq(fsm.ongoing("IDLE"))
+
             with m.State("IDLE"):
                 m.d.sync += ctr.eq(0)
                 with m.If(self.rx_trigger):
@@ -99,6 +102,50 @@ class CANTiming(Elaboratable):
         return m
 
 
+class CANDeStuff(Elaboratable):
+    def __init__(self, bus, timing):
+        self.bus = bus
+        self.timing = timing
+
+        self.sample_stb = Signal()
+        self.stuff_err = Signal()
+
+    def elaborate(self, platform):
+        # raw:     00000 00
+        # stuffed: 00000100
+
+        # raw:     11111 11
+        # stuffed: 11111011
+
+        m = Module()
+
+        last_bit = Signal()
+        stable_ctr = Signal(3)
+
+        sample_gate = stable_ctr < 4 # 5-1, because we need to gate the stobe
+        m.d.sync += self.sample_stb.eq(self.timing.sample_stb & sample_gate)
+
+        with m.If(self.timing.idle):
+            m.d.sync += [
+                last_bit.eq(1),
+                stable_ctr.eq(0),
+            ]
+
+        with m.Elif(self.timing.sample_stb):
+            m.d.sync += last_bit.eq(self.bus.rx_i)
+            with m.If(last_bit != self.bus.rx_i):
+                m.d.sync += stable_ctr.eq(0)
+            with m.Elif(stable_ctr >= 5):
+                # ERROR! this should be a stuffed bit, but it wasn't ... tsk tsk
+                # TODO: make this blow up
+                m.d.sync += stable_ctr.eq(0)
+                m.d.sync += self.stuff_err.eq(1)
+            with m.Else():
+                m.d.sync += stable_ctr.eq(stable_ctr + 1)
+
+        return m
+
+
 class CANLowLevel(Elaboratable):
     def __init__(self, bus):
         self.bus = bus
@@ -108,59 +155,25 @@ class CANLowLevel(Elaboratable):
         self.rx_data = Signal(32)          # TODO: remove this / move it out into another module??
 
         self.timing = CANTiming(bus)
+        self.destuff = CANDeStuff(bus, self.timing)
 
     def elaborate(self, platform):
         m = Module()
         m.submodules += self.timing
-
-        # de-stuff algorithm will count the number of bits that are the same, and
-        # skip the 6th bit...
-        destuff_rx_last = Signal()         # previous bit value
-        destuff_rx_cnt  = Signal(range(7)) # counter, 0-6
+        m.submodules += self.destuff
 
         with m.FSM() as fsm:
             with m.State("IDLE"):
                 m.d.sync += [
-                    # reset the de-stuff
-                    destuff_rx_last.eq(1),
-                    destuff_rx_cnt.eq(0),
-
-                    # reset data shift register
                     self.rx_data.eq(0),
                 ]
                 with m.If(self.timing.boundary_stb):
                     m.next = "SETUP"
 
             with m.State("SETUP"):
-                with m.If(self.timing.sample_stb):
-                    # raw:     00000 00
-                    # stuffed: 00000100
-
-                    # raw:     11111 11
-                    # stuffed: 11111011
-
-                    m.d.sync += destuff_rx_last.eq(self.bus.rx_i)
-
-
-                    with m.If(destuff_rx_last != self.bus.rx_i):
-                        m.d.sync += destuff_rx_cnt.eq(0)
-
-                    with m.Elif(destuff_rx_cnt >= 5):
-                        # ERROR! this should be a stuffed bit, but it wasn't ... tsk tsk
-                        # TODO: make this blow up
-                        m.d.sync += destuff_rx_cnt.eq(0)
-
-                    with m.Else():
-                        m.d.sync += destuff_rx_cnt.eq(destuff_rx_cnt + 1)
-
-
-                    with m.If(destuff_rx_cnt < 4):
-                        m.d.sync += self.rx_data.eq(Cat(self.bus.rx_i, self.rx_data[:-1]))
-                        m.next = "BIT_SAMPLE"
-                    with m.Else():
-                        m.next = "BIT_WAIT"
-
-                    m.d.comb += self.rx_rdy_raw.eq(1)
+                with m.If(self.destuff.sample_stb):
+                    m.d.sync += self.rx_data.eq(Cat(self.bus.rx_i, self.rx_data[:-1]))
+                    m.next = "BIT_SAMPLE"
 
             with m.State("BIT_SAMPLE"):
                 m.d.comb += self.rx_rdy.eq(1)
@@ -222,7 +235,7 @@ class CANSubtarget(Elaboratable):
 
         m.d.comb += [
             self.pads.dbgsp_t.oe.eq(1),
-            self.pads.dbgsp_t.o.eq(ll.rx_rdy),
+            self.pads.dbgsp_t.o.eq(ll.destuff.sample_stb),
             #self.pads.dbgsp_t.o.eq(crc.run),
             #self.pads.dbgsp_t.o.eq(ll.bit_boundary),
 
