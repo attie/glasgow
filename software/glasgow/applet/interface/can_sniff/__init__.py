@@ -47,22 +47,18 @@ class CANBus(Elaboratable):
         return m
 
 
-class CANLowLevel(Elaboratable):
+class CANTiming(Elaboratable):
     def __init__(self, bus):
-        self.bus = bus
+        self.rx_trigger = ~bus.rx_i # effectively CAN_H
+        self.run        = Signal()  # continue running? assert while in frame
 
-        self.rx_trigger = ~bus.rx_i        # effectively CAN_H
-        self.rx_run = Signal()             # continue running? assert while in frame
-        self.rx_rdy = Signal(reset=0)      # strobe for rx bits, excluding stuffed
-        self.rx_rdy_raw = Signal(reset=0)  # strobe for all rx bits, including stuffed
-        self.rx_data = Signal(32)          # TODO: remove this / move it out into another module??
-
-        self.bit_boundary = Signal()
+        self.boundary_stb    = Signal(reset=0) # strobe for rx bit boundary
+        self.sample_stb      = Signal(reset=0) # strobe for rx bit sample point
 
     def elaborate(self, platform):
         baudrate = 250000              # TODO: make variable, currently hard coded to 250 kbit/s
         quanta = baudrate * 10         # x10 is to permit time quanta in bit time
-        bit_cyc = round(48e6 / quanta) # ~19 for 250 kbit/s
+        bit_cyc = round(platform.default_clk_frequency / quanta) # ~19 for 250 kbit/s
 
         # TODO: make this configurable
         # <-- bit boundary
@@ -73,17 +69,49 @@ class CANLowLevel(Elaboratable):
         seg2 = 3
         # <-- bit boundary
 
-        # time from bit boundary to sample point
-        bit_setup_t   = sync + prop + seg1
-        bit_setup_cyc = bit_setup_t * bit_cyc
-
-        # time from bit boundray to next bit boundary
-        bit_period_t   = sync + prop + seg1 + seg2
-        bit_period_cyc = bit_period_t * bit_cyc
+        bit_setup_cyc  = (sync + prop + seg1       ) * bit_cyc # bit boundary to sample point
+        bit_period_cyc = (sync + prop + seg1 + seg2) * bit_cyc # bit boundray to next bit boundary
 
         m = Module()
 
         ctr = Signal(32)
+
+        with m.FSM() as fsm:
+            with m.State("IDLE"):
+                m.d.sync += ctr.eq(0)
+                with m.If(self.rx_trigger):
+                    m.d.comb += self.boundary_stb.eq(1)
+                    m.next = "RUN"
+
+            with m.State("RUN"):
+                m.d.sync += ctr.eq(ctr + 1)
+
+                with m.If(ctr == bit_setup_cyc):
+                    m.d.comb += self.sample_stb.eq(1)
+
+                with m.If(ctr >= bit_period_cyc):
+                    m.d.comb += self.boundary_stb.eq(1)
+                    m.d.sync += ctr.eq(0)
+
+                    with m.If(~self.run):
+                        m.next = "IDLE"
+
+        return m
+
+
+class CANLowLevel(Elaboratable):
+    def __init__(self, bus):
+        self.bus = bus
+
+        self.rx_rdy = Signal(reset=0)      # strobe for rx bits, excluding stuffed
+        self.rx_rdy_raw = Signal(reset=0)  # strobe for all rx bits, including stuffed
+        self.rx_data = Signal(32)          # TODO: remove this / move it out into another module??
+
+        self.timing = CANTiming(bus)
+
+    def elaborate(self, platform):
+        m = Module()
+        m.submodules += self.timing
 
         # de-stuff algorithm will count the number of bits that are the same, and
         # skip the 6th bit...
@@ -99,17 +127,12 @@ class CANLowLevel(Elaboratable):
 
                     # reset data shift register
                     self.rx_data.eq(0),
-
-                    ctr.eq(0),
                 ]
-                with m.If(self.rx_trigger):
-                    m.d.comb += self.bit_boundary.eq(1)
+                with m.If(self.timing.boundary_stb):
                     m.next = "SETUP"
 
             with m.State("SETUP"):
-                m.d.sync += ctr.eq(ctr + 1)
-
-                with m.If(ctr >= bit_setup_cyc):
+                with m.If(self.timing.sample_stb):
                     # raw:     00000 00
                     # stuffed: 00000100
 
@@ -144,13 +167,10 @@ class CANLowLevel(Elaboratable):
                 m.next = "BIT_WAIT"
 
             with m.State("BIT_WAIT"):
-                m.d.sync += ctr.eq(ctr + 1)
-                with m.If(ctr >= bit_period_cyc):
-                    m.d.comb += self.bit_boundary.eq(1)
-                    with m.If(~self.rx_run):
+                with m.If(self.timing.boundary_stb):
+                    with m.If(~self.timing.run):
                         m.next = "IDLE"
                     with m.Else():
-                        m.d.sync += ctr.eq(0)
                         m.next = "SETUP"
 
         return m
@@ -214,7 +234,7 @@ class CANSubtarget(Elaboratable):
         ctl_dlc = Signal(4)
 
         with m.FSM() as fsm:
-            m.d.comb += ll.rx_run.eq(~fsm.ongoing("IDLE"))
+            m.d.comb += ll.timing.run.eq(~fsm.ongoing("IDLE"))
             m.d.comb += crc.rst.eq(fsm.ongoing("IDLE"))
             m.d.comb += self.pads.dbgarb_t.o.eq(fsm.ongoing("IDLE"))
             #m.d.comb += self.pads.dbgarb_t.o.eq(fsm.ongoing("ARBITRATION-ID"))
@@ -224,7 +244,7 @@ class CANSubtarget(Elaboratable):
             #m.d.comb += self.pads.dbgarb_t.o.eq(fsm.ongoing("ACK-WAIT-FOR-END"))
 
             with m.State("IDLE"):
-                with m.If(ll.rx_trigger):
+                with m.If(ll.timing.rx_trigger):
                     m.d.sync += ctr.eq(10 + 1) # 1 is for SOF
                     m.d.sync += crc.run.eq(1)
                     m.next = "ARBITRATION-ID"
