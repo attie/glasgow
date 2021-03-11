@@ -49,7 +49,7 @@ class CANBus(Elaboratable):
 
 class CANTiming(Elaboratable):
     def __init__(self, bus):
-        self.rx_trigger = ~bus.rx_i # effectively CAN_H
+        self.rx_trigger = ~bus.rx_i # effectively CAN_H / rising edge for trigger
         self.run        = Signal()  # continue running? assert while in frame
 
         self.idle            = Signal()        # timing in idle
@@ -147,44 +147,26 @@ class CANDeStuff(Elaboratable):
 
 
 class CANLowLevel(Elaboratable):
-    def __init__(self, bus):
+    def __init__(self, bus, run, sample_stb):
         self.bus = bus
+        self.run = run
+        self.sample_stb = sample_stb
 
-        self.rx_rdy = Signal(reset=0)      # strobe for rx bits, excluding stuffed
-        self.rx_rdy_raw = Signal(reset=0)  # strobe for all rx bits, including stuffed
-        self.rx_data = Signal(32)          # TODO: remove this / move it out into another module??
-
-        self.timing = CANTiming(bus)
-        self.destuff = CANDeStuff(bus, self.timing)
+        self.rx_data = Signal(32)
+        self.rx_stb = Signal(reset=0) # strobe for rx bits, rx_data is ready
 
     def elaborate(self, platform):
         m = Module()
-        m.submodules += self.timing
-        m.submodules += self.destuff
 
-        with m.FSM() as fsm:
-            with m.State("IDLE"):
-                m.d.sync += [
-                    self.rx_data.eq(0),
-                ]
-                with m.If(self.timing.boundary_stb):
-                    m.next = "SETUP"
+        sample_stb_delay = Signal()
+        m.d.sync += sample_stb_delay.eq(self.sample_stb)
 
-            with m.State("SETUP"):
-                with m.If(self.destuff.sample_stb):
-                    m.d.sync += self.rx_data.eq(Cat(self.bus.rx_i, self.rx_data[:-1]))
-                    m.next = "BIT_SAMPLE"
-
-            with m.State("BIT_SAMPLE"):
-                m.d.comb += self.rx_rdy.eq(1)
-                m.next = "BIT_WAIT"
-
-            with m.State("BIT_WAIT"):
-                with m.If(self.timing.boundary_stb):
-                    with m.If(~self.timing.run):
-                        m.next = "IDLE"
-                    with m.Else():
-                        m.next = "SETUP"
+        with m.If(~self.run):
+            m.d.sync += self.rx_data.eq(0)
+        with m.Elif(self.sample_stb):
+            m.d.sync += self.rx_data.eq(Cat(self.bus.rx_i, self.rx_data[:-1]))
+        with m.Elif(sample_stb_delay):
+            m.d.comb += self.rx_stb.eq(1)
 
         return m
 
@@ -202,8 +184,8 @@ class CANCRC(Elaboratable):
 
         with m.If(self.rst):
             m.d.sync += self.out.eq(0)
-        with m.Elif(self.run & self.ll.rx_rdy):
-            new_bit = self.ll.bus.rx_i
+        with m.Elif(self.run & self.ll.rx_stb):
+            new_bit = self.ll.rx_data[0]
             next_out = Cat(Const(0, unsigned(1)), self.out[:-1])
             with m.If(new_bit ^ self.out[-1]):
                 m.d.sync += self.out.eq(next_out ^ Const(0x4599, unsigned(15)))
@@ -222,20 +204,20 @@ class CANSubtarget(Elaboratable):
         self.bit_cyc = bit_cyc
         self.rx_errors = rx_errors
 
-        self.can_bus = CANBus(pads)
-
         self.pads = pads
 
     def elaborate(self, platform):
         m = Module()
 
-        m.submodules.bus = bus = self.can_bus
-        m.submodules.ll = ll = CANLowLevel(bus)
+        m.submodules.bus = bus = CANBus(self.pads)
+        m.submodules.timing = timing = CANTiming(bus)
+        m.submodules.destuff = destuff = CANDeStuff(bus, timing)
+        m.submodules.ll = ll = CANLowLevel(bus, timing.run, destuff.sample_stb)
         m.submodules.crc = crc = CANCRC(ll)
 
         m.d.comb += [
             self.pads.dbgsp_t.oe.eq(1),
-            self.pads.dbgsp_t.o.eq(ll.destuff.sample_stb),
+            self.pads.dbgsp_t.o.eq(destuff.sample_stb),
             #self.pads.dbgsp_t.o.eq(crc.run),
             #self.pads.dbgsp_t.o.eq(ll.bit_boundary),
 
@@ -247,7 +229,7 @@ class CANSubtarget(Elaboratable):
         ctl_dlc = Signal(4)
 
         with m.FSM() as fsm:
-            m.d.comb += ll.timing.run.eq(~fsm.ongoing("IDLE"))
+            m.d.comb += timing.run.eq(~fsm.ongoing("IDLE"))
             m.d.comb += crc.rst.eq(fsm.ongoing("IDLE"))
             m.d.comb += self.pads.dbgarb_t.o.eq(fsm.ongoing("IDLE"))
             #m.d.comb += self.pads.dbgarb_t.o.eq(fsm.ongoing("ARBITRATION-ID"))
@@ -257,13 +239,13 @@ class CANSubtarget(Elaboratable):
             #m.d.comb += self.pads.dbgarb_t.o.eq(fsm.ongoing("ACK-WAIT-FOR-END"))
 
             with m.State("IDLE"):
-                with m.If(ll.timing.rx_trigger):
+                with m.If(timing.rx_trigger):
                     m.d.sync += ctr.eq(10 + 1) # 1 is for SOF
                     m.d.sync += crc.run.eq(1)
                     m.next = "ARBITRATION-ID"
 
             with m.State("ARBITRATION-ID"):
-                with m.If(ll.rx_rdy):
+                with m.If(ll.rx_stb):
                     m.d.sync += ctr.eq(ctr - 1)
 
                     # 10 9 8
@@ -284,7 +266,7 @@ class CANSubtarget(Elaboratable):
                         m.next = "ARBITRATION-CONTROL"
 
             with m.State("ARBITRATION-CONTROL"):
-                with m.If(ll.rx_rdy):
+                with m.If(ll.rx_stb):
                     m.d.sync += ctr.eq(ctr - 1)
 
                     with m.If(ctr == 0):
@@ -304,7 +286,7 @@ class CANSubtarget(Elaboratable):
                             m.next = "DATA"
 
             with m.State("DATA"):
-                with m.If(ll.rx_rdy):
+                with m.If(ll.rx_stb):
                     m.d.sync += ctr.eq(ctr - 1)
 
                     with m.If(ctr == 0):
@@ -323,7 +305,7 @@ class CANSubtarget(Elaboratable):
                             m.next = "CRC"
 
             with m.State("CRC"):
-                with m.If(ll.rx_rdy):
+                with m.If(ll.rx_stb):
                     m.d.sync += ctr.eq(ctr - 1)
 
                     with m.If(ctr == 8):
@@ -353,7 +335,7 @@ class CANSubtarget(Elaboratable):
                 m.next = "IDLE-WAIT"
 
             with m.State("IDLE-WAIT"):
-                with m.If(ll.rx_rdy):
+                with m.If(ll.rx_stb):
                     m.d.sync += ctr.eq(ctr - 1)
                     
                     with m.If(ctr == 0):
