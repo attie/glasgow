@@ -1,0 +1,29 @@
+FROM ubuntu:22.04
+
+RUN echo "set enable-bracketed-paste off" >>/etc/inputrc \
+	&& apt update \
+	&& apt install -y --no-install-recommends \
+		curl git \
+		python3 python3-setuptools python3-pip python3-libusb1 python3-aiohttp python3-bitarray \
+	&& rm -rf /var/lib/apt/lists/* \
+	&& pip install --upgrade pip
+
+# see: https://github.com/YosysHQ/oss-cad-suite-build/releases/latest
+RUN mkdir /opt/oss-cad-suite \
+	&& curl -L 'https://github.com/YosysHQ/oss-cad-suite-build/releases/download/2023-06-30/oss-cad-suite-linux-x64-20230630.tgz' \
+		| gzip -d \
+		| tar -xv -C /opt/oss-cad-suite --strip-components 1
+ENV PATH="${PATH}:/opt/oss-cad-suite/bin"
+
+COPY . /opt/glasgow/
+RUN pip install --editable '/opt/glasgow/software/'
+
+RUN groupadd -g 1000 user \
+	&& useradd -u 1000 -g user -m user -s /usr/bin/bash \
+	&& usermod -aG plugdev user
+USER user
+WORKDIR /home/user/
+RUN mkdir -p /home/user/.cache/GlasgowEmbedded
+VOLUME /home/user/.cache/GlasgowEmbedded
+
+ENTRYPOINT [ "/usr/local/bin/glasgow" ]

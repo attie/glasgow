@@ -1,0 +1,63 @@
+stages:
+  - build
+  - selftest
+
+.template:rules: &template_rules
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "docker"'
+
+.template:build: &template_build
+  <<: *template_rules
+  stage: build
+  image:
+    name: gcr.io/kaniko-project/executor:debug
+    entrypoint: [""]
+  script: &template_build_script
+    - echo "{\"auths\":{\"${CI_REGISTRY}\":{\"auth\":\"$(printf "%s:%s" "${CI_REGISTRY_USER}" "${CI_REGISTRY_PASSWORD}" | base64 | tr -d '\n')\"}}}"
+        > /kaniko/.docker/config.json
+
+.template:selftest: &template_selftest
+  <<: *template_rules
+  stage: selftest
+  script:
+    - glasgow -vv build --rev C3 selftest
+
+
+build:system:
+  <<: *template_build
+  script:
+    - *template_build_script
+    - /kaniko/executor
+        --cleanup
+        --context "${CI_PROJECT_DIR}"
+        --dockerfile "${CI_PROJECT_DIR}/Dockerfile.system"
+        --destination "${CI_REGISTRY_IMAGE}:system-${CI_COMMIT_SHORT_SHA}"
+        --destination "${CI_REGISTRY_IMAGE}:system"
+        --destination "${CI_REGISTRY_IMAGE}:latest"
+
+build:builtin:
+  <<: *template_build
+  script:
+    - *template_build_script
+    - /kaniko/executor
+        --cleanup
+        --context "${CI_PROJECT_DIR}"
+        --dockerfile "${CI_PROJECT_DIR}/Dockerfile.builtin"
+        --destination "${CI_REGISTRY_IMAGE}:builtin-${CI_COMMIT_SHORT_SHA}"
+        --destination "${CI_REGISTRY_IMAGE}:builtin"
+
+selftest:system:
+  <<: *template_selftest
+  needs:
+    - job: build:system
+  image:
+    name: docker.agsys.io/attie/glasgow:system
+    entrypoint: [ "" ]
+
+selftest:builtin:
+  <<: *template_selftest
+  needs:
+    - job: build:builtin
+  image:
+    name: docker.agsys.io/attie/glasgow:builtin
+    entrypoint: [ "" ]
