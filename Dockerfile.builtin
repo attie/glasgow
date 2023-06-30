@@ -1,0 +1,22 @@
+FROM ubuntu:22.04
+
+RUN echo "set enable-bracketed-paste off" >>/etc/inputrc \
+	&& apt update \
+	&& apt install -y --no-install-recommends \
+		curl git \
+		python3 python3-setuptools python3-pip python3-libusb1 python3-aiohttp python3-bitarray \
+	&& rm -rf /var/lib/apt/lists/* \
+	&& pip install --upgrade pip
+
+COPY . /opt/glasgow/
+RUN pip install --editable '/opt/glasgow/software/[builtin-toolchain]'
+
+RUN groupadd -g 1000 user \
+	&& useradd -u 1000 -g user -m user -s /usr/bin/bash \
+	&& usermod -aG plugdev user
+USER user
+WORKDIR /home/user/
+RUN mkdir -p /home/user/.cache/GlasgowEmbedded
+VOLUME /home/user/.cache/GlasgowEmbedded
+
+ENTRYPOINT [ "/usr/local/bin/glasgow" ]
