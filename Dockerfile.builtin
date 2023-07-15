@@ -14,6 +14,13 @@ RUN pip install --editable '/opt/glasgow/software/[builtin-toolchain]'
 RUN groupadd -g 1000 user \
 	&& useradd -u 1000 -g user -m user -s /usr/bin/bash \
 	&& usermod -aG plugdev user
+
+RUN apt update \
+	&& apt install -y sudo \
+	&& rm -rf /var/lib/apt/lists/* \
+	&& usermod -aG sudo user \
+	&& echo "user ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
+
 USER user
 WORKDIR /home/user/
 RUN mkdir -p /home/user/.cache/GlasgowEmbedded
