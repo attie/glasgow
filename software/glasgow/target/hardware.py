@@ -135,7 +135,11 @@ class GlasgowBuildPlan:
         if build_dir is None:
             build_dir = tempfile.mkdtemp(prefix="glasgow_")
         try:
-            products  = self.lower.execute_local(build_dir, env=self.toolchain.env_vars)
+            import os
+            env = self.toolchain.env_vars
+            if 'HOME' in os.environ:
+                env['HOME'] = os.environ['HOME']
+            products  = self.lower.execute_local(build_dir, env=env)
             bitstream = products.get("top.bin")
         except:
             if debug:
