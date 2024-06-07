@@ -128,6 +128,7 @@ sensor-scd30 = "glasgow.applet.sensor.scd30:SensorSCD30Applet"
 trigger-level-timeout = "glasgow.applet.trigger.level_timeout:LevelTimeoutApplet"
 
 siggen-freq = "glasgow.applet.siggen.freq:SigGenFreqApplet"
+siggen-pattern = "glasgow.applet.siggen.pattern:SigGenPatternApplet"
 
 display-hd44780 = "glasgow.applet.display.hd44780:DisplayHD44780Applet"
 display-pdi = "glasgow.applet.display.pdi:DisplayPDIApplet"
